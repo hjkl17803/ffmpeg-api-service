@@ -68,29 +68,31 @@ app.post('/api/merge', async (req, res) => {
   console.log(`[${requestId}] 📥 收到合併請求`);
   
   try {
-    const { 
-      audio_url, 
-      image_data, 
-      duration = 'auto',
-      resolution = '1920x1080'
-    } = req.body;
-    
-    // 驗證參數
-    if (!audio_url) {
-      return res.status(400).json({ 
-        success: false,
-        error: '缺少參數：audio_url',
-        request_id: requestId
-      });
-    }
-    
-    if (!image_data) {
-      return res.status(400).json({ 
-        success: false,
-        error: '缺少參數：image_data (base64 編碼的圖片)',
-        request_id: requestId
-      });
-    }
+  const { 
+  audio_url, 
+  image_data,      // base64 圖片（可選）
+  image_url,       // 圖片 URL（可選）
+  duration = 'auto', 
+  resolution = '1920x1080' 
+} = req.body;
+
+// 驗證參數
+if (!audio_url) {
+  return res.status(400).json({ 
+    success: false,
+    error: '缺少參數：audio_url',
+    request_id: requestId
+  });
+}
+
+// image_data 和 image_url 必須提供其中一個
+if (!image_data && !image_url) {
+  return res.status(400).json({ 
+    success: false,
+    error: '缺少參數：必須提供 image_data (base64) 或 image_url',
+    request_id: requestId
+  });
+}
     
     // 解析解析度
     const [width, height] = resolution.split('x').map(Number);
@@ -110,10 +112,23 @@ app.post('/api/merge', async (req, res) => {
     
     try {
       // 1. 儲存圖片
-      console.log(`[${requestId}] 💾 儲存圖片...`);
-      const imageBuffer = Buffer.from(image_data, 'base64');
-      await fs.writeFile(imagePath, imageBuffer);
-      console.log(`[${requestId}] ✓ 圖片大小: ${(imageBuffer.length / 1024 / 1024).toFixed(2)} MB`);
+      // 處理圖片（支援 URL 或 base64）
+let imageBuffer;
+if (image_url) {
+  console.log(`[${requestId}] 從 URL 下載圖片: ${image_url.substring(0, 50)}...`);
+  const imageResponse = await axios.get(image_url, {
+    responseType: 'arraybuffer',
+    timeout: 60000,
+    maxContentLength: 50 * 1024 * 1024 // 50MB
+  });
+  imageBuffer = Buffer.from(imageResponse.data);
+} else {
+  console.log(`[${requestId}] 從 base64 儲存圖片...`);
+  imageBuffer = Buffer.from(image_data, 'base64');
+}
+
+await fs.writeFile(imagePath, imageBuffer);
+console.log(`[${requestId}] 圖片大小: ${(imageBuffer.length / 1024 / 1024).toFixed(2)} MB`);
       
       // 2. 下載音樂
       console.log(`[${requestId}] 🎵 下載音樂: ${audio_url.substring(0, 50)}...`);
