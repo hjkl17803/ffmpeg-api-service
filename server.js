@@ -216,23 +216,38 @@ console.log(`[${requestId}] 圖片大小: ${(imageBuffer.length / 1024 / 1024).t
       await Promise.all([
         fs.unlink(imagePath).catch(e => console.error(`清理 ${imagePath} 失敗:`, e.message)),
         fs.unlink(audioPath).catch(e => console.error(`清理 ${audioPath} 失敗:`, e.message)),
-        fs.unlink(outputPath).catch(e => console.error(`清理 ${outputPath} 失敗:`, e.message))
+        
       ]);
       
       const processingTime = Date.now() - startTime;
       console.log(`[${requestId}] 🎉 合成成功，總耗時 ${(processingTime / 1000).toFixed(2)}s`);
       
       // 6. 返回結果
-      res.json({
-        success: true,
-        video_data: videoBuffer.toString('base64'),
-        size: stats.size,
-        size_mb: parseFloat((stats.size / 1024 / 1024).toFixed(2)),
-        processing_time_ms: processingTime,
-        processing_time_sec: parseFloat((processingTime / 1000).toFixed(2)),
-        resolution: resolution,
-        request_id: requestId
-      });
+// 不立即刪除影片，而是保存下載信息
+const fileName = `video_${requestId}.mp4`;
+tempVideos.set(requestId, {
+  path: outputPath,
+  fileName: fileName,
+  timestamp: Date.now()
+});
+
+// 返回下載 URL 而不是 base64
+res.json({
+  success: true,
+  download_url: `/api/download/${requestId}`,
+  size: stats.size,
+  size_mb: parseFloat((stats.size / 1024 / 1024).toFixed(2)),
+  processing_time_ms: processingTime,
+  processing_time_sec: parseFloat((processingTime / 1000).toFixed(2)),
+  resolution: resolution,
+  request_id: requestId
+});
+
+// 只清理圖片和音樂
+await Promise.all([
+  fs.unlink(imagePath).catch(() => {}),
+  fs.unlink(audioPath).catch(() => {})
+]);
       
     } catch (innerError) {
       // 發生錯誤時清理檔案
@@ -254,7 +269,84 @@ console.log(`[${requestId}] 圖片大小: ${(imageBuffer.length / 1024 / 1024).t
     });
   }
 });
+// ============== 新增：影片臨時存儲和下載功能 ===============
 
+// 存儲臨時影片的 Map
+const tempVideos = new Map();
+
+// 定期清理過期影片（5分鐘後刪除）
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, data] of tempVideos.entries()) {
+    if (now - data.timestamp > 5 * 60 * 1000) {
+      fs.unlink(data.path).catch(() => {});
+      tempVideos.delete(id);
+      console.log(`[清理] 已刪除過期影片: ${id}`);
+    }
+  }
+}, 60 * 1000); // 每分鐘檢查一次
+
+// 下載影片端點
+app.get('/api/download/:requestId', async (req, res) => {
+  const { requestId } = req.params;
+  
+  console.log(`[下載] 請求下載影片: ${requestId}`);
+  
+  const videoData = tempVideos.get(requestId);
+  
+  if (!videoData) {
+    console.log(`[下載] 影片不存在或已過期: ${requestId}`);
+    return res.status(404).json({
+      success: false,
+      error: '影片不存在或已過期（5分鐘後自動刪除）'
+    });
+  }
+  
+  try {
+    // 檢查文件是否存在
+    const exists = await fs.access(videoData.path).then(() => true).catch(() => false);
+    
+    if (!exists) {
+      tempVideos.delete(requestId);
+      console.log(`[下載] 文件已被刪除: ${requestId}`);
+      return res.status(404).json({
+        success: false,
+        error: '影片文件已被刪除'
+      });
+    }
+    
+    // 讀取影片
+    const videoBuffer = await fs.readFile(videoData.path);
+    
+    console.log(`[下載] 開始傳送影片: ${requestId}, 大小: ${(videoBuffer.length / 1024 / 1024).toFixed(2)} MB`);
+    
+    // 設置響應頭
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', `attachment; filename="${videoData.fileName}"`);
+    res.setHeader('Content-Length', videoBuffer.length);
+    
+    // 發送文件
+    res.send(videoBuffer);
+    
+    // 下載完成後延遲刪除（給時間完成傳輸）
+    setTimeout(() => {
+      fs.unlink(videoData.path).catch(err => {
+        console.error(`[清理] 刪除文件失敗: ${videoData.path}`, err.message);
+      });
+      tempVideos.delete(requestId);
+      console.log(`[清理] 已下載並清理: ${requestId}`);
+    }, 2000); // 2秒後清理
+    
+  } catch (error) {
+    console.error(`[下載] 失敗: ${requestId}`, error.message);
+    res.status(500).json({
+      success: false,
+      error: `下載失敗: ${error.message}`
+    });
+  }
+});
+
+// ============== 新增代碼結束 ===============
 // 錯誤處理
 app.use((err, req, res, next) => {
   console.error('未處理的錯誤:', err);
